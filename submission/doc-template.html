@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cart Referral Tracking – Technical Assessment Submission</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  body { font: 10.5pt/1.5 "Segoe UI", Arial, sans-serif; color: #1d2327; }
+  h1 { font-size: 22pt; margin: 0 0 4px; }
+  h2 { font-size: 15pt; border-bottom: 2px solid #3b82f6; padding-bottom: 4px; margin-top: 26px; page-break-after: avoid; }
+  h3 { font-size: 12pt; margin: 18px 0 6px; page-break-after: avoid; }
+  .sub { color: #50575e; margin: 0 0 18px; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 9.5pt; }
+  th, td { border: 1px solid #c3c4c7; padding: 5px 7px; text-align: left; vertical-align: top; }
+  th { background: #f0f0f1; }
+  code { font: 9pt Consolas, monospace; background: #f0f0f1; padding: 1px 4px; border-radius: 3px; }
+  pre { font: 7.6pt/1.35 Consolas, monospace; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 4px; padding: 8px 10px; white-space: pre-wrap; word-break: break-word; }
+  pre code { background: none; padding: 0; font: inherit; }
+  figure { margin: 10px 0 18px; page-break-inside: avoid; }
+  figure img { width: 100%; border: 1px solid #c3c4c7; }
+  figcaption { font-size: 9pt; color: #50575e; margin-top: 4px; }
+  .file { font-weight: 600; margin: 14px 0 4px; page-break-after: avoid; }
+  .ok { color: #008a20; font-weight: 600; }
+  .note { background: #fcf9e8; border-left: 4px solid #dba617; padding: 8px 12px; }
+  .break { page-break-before: always; }
+</style>
+</head>
+<body>
+
+<h1>Cart Referral Tracking for WooCommerce</h1>
+<p class="sub">Technical Assessment submission · Custom plugin <strong>“UID Cart Referral Tracker”</strong> v1.0.0 · {{DATE}}</p>
+
+<h2>1. Summary</h2>
+<p>A custom WordPress plugin, written from scratch, that:</p>
+<ul>
+  <li>detects <code>?uid_temp=STRING_ID</code> on any page and stores it in the browser’s <code>localStorage</code>, where it stays available on every page the visitor opens afterwards;</li>
+  <li>reads the code back from <code>localStorage</code> on every add-to-cart (single-product form submit, shop/archive AJAX buttons, plain add-to-cart links and block/Store API requests) and logs the event into a custom table;</li>
+  <li>shows the log under <strong>WooCommerce → Cart Referrals</strong> with tracking code, product, quantity, price, source, customer, linked order and timestamp, plus filters, search, sorting, bulk delete and CSV export.</li>
+</ul>
+
+<p><strong>Plugins used:</strong> no referral or affiliate plugin was used. The only third-party components are <strong>WooCommerce 11.2.1</strong> (the store itself, as required) and the free <strong>Storefront 4.6.2</strong> theme. All tracking logic lives in the custom plugin documented below.</p>
+
+<h3>Environment</h3>
+<table>
+  <tr><th>Item</th><th>Value</th></tr>
+  <tr><td>Live site</td><td><code>https://whitesmoke-jaguar-764371.hostingersite.com/</code> (Hostinger, PHP 8.2, LiteSpeed). Built and first tested locally on XAMPP.</td></tr>
+  <tr><td>WordPress</td><td>7.1.3</td></tr>
+  <tr><td>WooCommerce</td><td>11.2.1, currency INR, store address Kerala, India</td></tr>
+  <tr><td>Payment</td><td>Cash on Delivery enabled</td></tr>
+  <tr><td>Demo products</td><td>Classic Cotton T-Shirt (₹499), Leather Wallet (₹899), Stainless Water Bottle (₹649), Wireless Earbuds (₹2,499), Canvas Backpack (₹1,599)</td></tr>
+  <tr><td>Admin login</td><td><code>https://whitesmoke-jaguar-764371.hostingersite.com/wp-admin</code>. Username <code>admin</code>, password <code>Admin#456Pass</code></td></tr>
+  <tr><td>Test link format</td><td><code>https://whitesmoke-jaguar-764371.hostingersite.com/?uid_temp=YOUR_CODE</code> (works on any page, e.g. <code>/shop/?uid_temp=YOUR_CODE</code> or a product URL)</td></tr>
+</table>
+
+<h2>2. How it works</h2>
+
+<h3>A. Capture &amp; persist (frontend)</h3>
+<ol>
+  <li>The plugin enqueues <code>assets/js/uct-tracker.js</code> on every frontend page, together with a nonce created by <code>wp_create_nonce()</code>.</li>
+  <li>On page load the script reads <code>uid_temp</code> from the URL with <code>URLSearchParams</code>, strips control and markup characters, limits it to 100 characters and saves it with <code>localStorage.setItem('uid_temp', value)</code>. A newer shared link replaces an older code (last click wins).</li>
+  <li>Because <code>localStorage</code> is per-origin, the code stays available on every later page, tab and visit until the visitor clears site data.</li>
+  <li>The script also mirrors the value into a first-party cookie (<code>uct_uid_temp</code>, SameSite=Lax, 30 days). The cookie is only a fallback for WooCommerce block/Store API requests, whose JSON body cannot be extended. <code>localStorage</code> stays the source of truth: the cookie is rewritten from it on each page view.</li>
+</ol>
+
+<h3>B. Cart tracking (backend &amp; database)</h3>
+<table>
+  <tr><th>Add-to-cart path</th><th>How the code is sent from localStorage</th><th>Logged as</th></tr>
+  <tr><td>Single-product page form submit</td><td>Hidden inputs <code>uid_temp</code> and <code>uct_nonce</code> are injected into <code>form.cart</code> in a capture-phase submit listener.</td><td><code>form</code></td></tr>
+  <tr><td>Shop/archive AJAX buttons</td><td>The <code>adding_to_cart</code> jQuery event receives WooCommerce’s request data object by reference; the code and nonce are added to it. A <code>$.ajaxPrefilter</code> covers other jQuery add-to-cart calls from themes or quick-view plugins.</td><td><code>ajax</code></td></tr>
+  <tr><td>Plain <code>?add-to-cart=ID</code> links (AJAX disabled)</td><td>A click listener appends <code>uid_temp</code> and <code>uct_nonce</code> to the link before navigation.</td><td><code>link</code></td></tr>
+  <tr><td>Block themes / Store API</td><td>Server reads the cookie mirror.</td><td><code>store_api</code></td></tr>
+</table>
+<p>On the server, one hook handles all four paths: <code>woocommerce_add_to_cart</code>, which fires once for every successful add. The handler:</p>
+<ol>
+  <li>reads <code>$_REQUEST['uid_temp']</code> and accepts it only when <code>wp_verify_nonce()</code> passes, otherwise falls back to the cookie mirror;</li>
+  <li>sanitizes with <code>wp_unslash()</code> and <code>sanitize_text_field()</code>, and truncates to 100 characters;</li>
+  <li>takes a snapshot of the product name, SKU and price, and records the quantity, source, user, WooCommerce session, IP, user agent, referrer and both local and GMT timestamps;</li>
+  <li>inserts the row with <code>$wpdb->prepare()</code>.</li>
+</ol>
+<p>When the visitor checks out (classic or block checkout), the code is saved on the order as <code>_uid_temp</code>, shown on the order edit screen, and the matching log rows get their <code>order_id</code> filled in.</p>
+
+<h3>Table <code>wp_uid_cart_referrals</code></h3>
+<table>
+  <tr><th>Column</th><th>Type</th><th>Purpose</th></tr>
+  <tr><td>id</td><td>bigint unsigned, PK</td><td>Row ID</td></tr>
+  <tr><td>uid_temp</td><td>varchar(100), indexed</td><td>Tracking code read from localStorage</td></tr>
+  <tr><td>product_id / variation_id</td><td>bigint unsigned</td><td>Product added (variation 0 for simple products)</td></tr>
+  <tr><td>product_name / product_sku</td><td>varchar</td><td>Snapshot at the time of the event, kept even if the product changes later</td></tr>
+  <tr><td>quantity</td><td>int unsigned</td><td>Quantity added in this action</td></tr>
+  <tr><td>unit_price</td><td>decimal(19,4)</td><td>Price snapshot</td></tr>
+  <tr><td>cart_item_key</td><td>varchar(64)</td><td>WooCommerce cart line</td></tr>
+  <tr><td>source</td><td>varchar(20)</td><td>form, ajax, link or store_api</td></tr>
+  <tr><td>user_id / session_key</td><td>bigint / varchar</td><td>Logged-in user (0 = guest) and WooCommerce customer session</td></tr>
+  <tr><td>ip_address / user_agent / referer_url</td><td>varchar</td><td>Request context</td></tr>
+  <tr><td>order_id</td><td>bigint unsigned, nullable</td><td>Order placed by the same session for this product</td></tr>
+  <tr><td>created_at / created_at_gmt</td><td>datetime</td><td>Site-local and UTC timestamps</td></tr>
+</table>
+
+<h3>C. Admin dashboard</h3>
+<p><strong>WooCommerce → Cart Referrals</strong> requires the <code>manage_woocommerce</code> capability. It shows summary cards, the top five codes and a <code>WP_List_Table</code>. The table has search by code or product, filters by source and date range, sorting on whitelisted columns, pagination, a nonce-checked bulk delete and a nonce-checked CSV export.</p>
+
+<h2>3. Security</h2>
+<table>
+  <tr><th>Requirement</th><th>Implementation</th></tr>
+  <tr><td>Input sanitization</td><td><code>sanitize_text_field( wp_unslash() )</code> for the code, user agent and filters; <code>absint()</code> for IDs and quantities; <code>sanitize_key()</code> for order and sort keys; dates validated against a regex; <code>esc_url_raw()</code> for the referrer. The client side also cleans the value before storing it.</td></tr>
+  <tr><td>Prepared queries</td><td>Every INSERT, UPDATE, DELETE and filtered SELECT uses <code>$wpdb->prepare()</code>. <code>LIKE</code> searches use <code>$wpdb->esc_like()</code>. Sort columns and directions are whitelisted.</td></tr>
+  <tr><td>Nonces</td><td>The frontend sends <code>uct_nonce</code> with every add-to-cart and the server checks it with <code>wp_verify_nonce()</code>, which blocks cross-site forged attribution. The nonce action does not start with “woocommerce”, so guest nonces stay stable before and after the WooCommerce session starts. Bulk delete uses <code>check_admin_referer('bulk-referrals')</code> and CSV export uses <code>check_admin_referer('uct_export')</code>.</td></tr>
+  <tr><td>Output escaping</td><td>All admin output goes through <code>esc_html</code>, <code>esc_attr</code> or <code>esc_url</code>. The CSV export neutralises cells starting with <code>= + - @</code> to prevent formula injection.</td></tr>
+  <tr><td>Access control</td><td>The admin page, bulk delete and export all check <code>current_user_can('manage_woocommerce')</code>.</td></tr>
+</table>
+
+<h2 class="break">4. Test results</h2>
+<p>The full flow was run on the live Hostinger site in headless Chrome with the code <code>HUE-LIVE-001</code>, then checked directly in the database.</p>
+<table>
+  <tr><th>#</th><th>Test</th><th>Result</th></tr>
+  <tr><td>1</td><td>Open <code>/?uid_temp=HUE-LIVE-001</code></td><td class="ok">localStorage.uid_temp = HUE-LIVE-001</td></tr>
+  <tr><td>2</td><td>Navigate to <code>/shop/</code> without the parameter</td><td class="ok">Value still present</td></tr>
+  <tr><td>3</td><td>AJAX “Add to cart” on the shop page</td><td class="ok">Logged, source ajax</td></tr>
+  <tr><td>4</td><td>Single product form, quantity 2</td><td class="ok">Logged, quantity 2, source form</td></tr>
+  <tr><td>5</td><td>Plain <code>?add-to-cart=ID</code> link</td><td class="ok">Link rewritten with code and nonce, logged as link</td></tr>
+  <tr><td>6</td><td>Store API <code>cart/add-item</code></td><td class="ok">Logged through cookie fallback, source store_api</td></tr>
+  <tr><td>7</td><td>Forged AJAX request with <code>uid_temp=FORGED</code> and an invalid nonce</td><td class="ok">FORGED rejected. The row was attributed to the visitor’s real code</td></tr>
+  <tr><td>8</td><td>Checkout with Cash on Delivery</td><td class="ok">Order created as Processing. All five rows linked to the order. Code shown on the order screen</td></tr>
+</table>
+
+<h3>Database rows after the test</h3>
+<pre><code>{{DBROWS}}</code></pre>
+
+<h3>Screenshots</h3>
+<figure><img src="screenshots-live/01-landing-with-uid_temp.png"><figcaption>1. Landing on the shared link. The dark box is a test overlay that prints the current localStorage value.</figcaption></figure>
+<figure><img src="screenshots-live/02-shop-persisted.png"><figcaption>2. Shop page opened without the parameter. The code persists in localStorage.</figcaption></figure>
+<figure><img src="screenshots-live/03-ajax-add-to-cart.png"><figcaption>3. AJAX add-to-cart on the shop archive.</figcaption></figure>
+<figure><img src="screenshots-live/04-single-product-form-submit.png"><figcaption>4. Single-product form submit with quantity 2.</figcaption></figure>
+<figure><img src="screenshots-live/05-cart.png"><figcaption>5. Cart after the four add-to-cart paths.</figcaption></figure>
+<figure><img src="screenshots-live/06-order-received-cod.png"><figcaption>6. Order received, paid with Cash on Delivery.</figcaption></figure>
+<figure><img src="screenshots-live/07-admin-cart-referrals.png"><figcaption>7. WooCommerce → Cart Referrals: summary, top codes and the log with code, product, quantity, price, source, customer, order and timestamp.</figcaption></figure>
+<figure><img src="screenshots-live/08-admin-order-referral-code.png"><figcaption>8. The referral code saved on the order.</figcaption></figure>
+<figure><img src="screenshots-live/09-admin-filter-ajax.png"><figcaption>9. Log filtered by source = AJAX.</figcaption></figure>
+
+<h2 class="break">5. Installation</h2>
+<ol>
+  <li>Copy the <code>uid-cart-tracker</code> folder into <code>wp-content/plugins/</code>, or upload <code>uid-cart-tracker.zip</code> under Plugins → Add New → Upload.</li>
+  <li>Activate WooCommerce, then activate “UID Cart Referral Tracker”. Activation creates the table <code>{prefix}uid_cart_referrals</code>.</li>
+  <li>Share any store URL with <code>?uid_temp=CODE</code> appended, add products to the cart, then open WooCommerce → Cart Referrals.</li>
+  <li>Deleting the plugin from the Plugins screen drops the table (<code>uninstall.php</code>).</li>
+</ol>
+<p class="note">By default only add-to-carts that carry a code are logged, since the page is a referral log. Developers can log every add-to-cart with <code>add_filter( 'uct_log_without_uid', '__return_true' );</code>. On sites with full-page caching, cached pages can serve an expired nonce after 24 hours. In that case the cookie fallback still attributes the event.</p>
+
+<h2>6. Source code</h2>
+<p>File structure:</p>
+<pre><code>uid-cart-tracker/
+├── uid-cart-tracker.php            Bootstrap, constants, hooks, HPOS compatibility
+├── uninstall.php                   Drops the table on delete
+├── assets/js/uct-tracker.js        Capture, persist and inject (frontend)
+└── includes/
+    ├── functions.php               Table name and sanitizer helpers
+    ├── class-uct-install.php       dbDelta schema
+    ├── class-uct-tracker.php       Add-to-cart logging, order linking
+    ├── class-uct-admin.php         WooCommerce → Cart Referrals page, CSV export
+    └── class-uct-list-table.php    WP_List_Table for the log</code></pre>
+
+{{CODE:uid-cart-tracker.php}}
+{{CODE:assets/js/uct-tracker.js}}
+{{CODE:includes/functions.php}}
+{{CODE:includes/class-uct-install.php}}
+{{CODE:includes/class-uct-tracker.php}}
+{{CODE:includes/class-uct-admin.php}}
+{{CODE:includes/class-uct-list-table.php}}
+{{CODE:uninstall.php}}
+
+</body>
+</html>
